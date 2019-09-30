@@ -31,14 +31,6 @@
      ,@body
      (format t "DONE")))
 
-;; init command
-(defun init (&optional (target nil))
-  (format t "Initialize repository~%")
-
-  (proc-block "creating rgitfile"
-    (with-open-file (out +config-path+ :direction :output :if-exists :supersede)
-      (write-line "(:target ((\"/snapshot/target/directory/\" . \"mapped/\")))~%" out))))
-
 ;; Read file
 (defun slurp (path)
   (with-open-file (s path :direction :input)
@@ -65,14 +57,40 @@
               while byte
               do (write-byte byte outs))))))
 
-;; Read rgitfile
-(defun read-config ()
-  (setf *config* (read-from-string (slurp +config-path+))))
-
 ;; Compare MD5
 (defun p-hashequal (x y)
   (equal (coerce (md5:md5sum-file (pathname x)) 'list)
          (coerce (md5:md5sum-file (pathname y)) 'list)))
+
+;; Is file
+(defun p-file (path)
+  (not (equal "" (file-namestring (pathname path)))))
+
+;; Read rgitfile
+(defun read-config ()
+  (setf *config* (read-from-string (slurp +config-path+))))
+
+;; init command
+(defun init (&optional (target nil))
+  (format t "Initialize repository~%")
+
+  (proc-block "creating rgitfile"
+    (with-open-file (out +config-path+ :direction :output :if-exists :supersede)
+      (write-line "(:target ((\"/snapshot/target/directory/\" . \"mapped/\")))~%" out))))
+
+;; Fetch file
+(defun fetch-file (src dst)
+  (logging (format t "FETCH ~A~%" (pathname src)))
+  (copy-file (pathname src) (pathname dst)))
+
+;; Update file
+(defun update-file (src dst)
+  (logging (format t "UPDATE ~A~%" (pathname src)))
+  (copy-file (pathname src) (pathname dst)))
+
+;; Skip processing file
+(defun skip-file (src)
+  (logging (format t "SKIP ~A~%" src)))
 
 ;; Synchronize directory
 (defun sync-dir (p)
@@ -95,7 +113,7 @@
                            del-ls))
             
             ; Process file
-            (when (not (equal "" (file-namestring (pathname src))))
+            (when (p-file src)
               (let ((dst (merge-pathnames 
                            (enough-namestring (pathname src) (pathname (car p)))
                            (pathname (cdr p)))))
@@ -103,45 +121,30 @@
                 (ensure-directories-exist (directory-namestring dst))
                 
                 ; Fetch file
+                ; TODO : filter needed
                 (when (and (not (search "$" (namestring (pathname src)))))
                   (if (probe-file (pathname dst))
-                      (progn
-                        (if (not (p-hashequal (pathname src) (pathname dst)))
-                            (progn
-                              (logging 
-                                (format t "update ~A~%" (pathname src)))
-                              (copy-file (pathname src) (pathname dst)))
-                            (progn
-                              (logging 
-                                (format t "skip ~A~%" (pathname src))))))
-                      (progn
-                        (logging 
-                          (format t "fetch ~A~%" (pathname src)))
-                        (copy-file (pathname src) (pathname dst))))))))
+                      ;; File already fetched
+                      (if (not (p-hashequal (pathname src) (pathname dst)))
+                          ;; File modified
+                          (update-file src dst)
+
+                          ;; File not modified
+                          (skip-file src))
+
+                      ;; File not fetched yet
+                      (fetch-file src dst))))))
           (directory (format nil "~A**/*.*" (car p))))
 
           ; Delete missing files
           (mapcar 
             (lambda (x)
-              (when (not (equal "" (file-namestring (pathname x))))
+              (when (p-file x)
                 (delete-file x)))
             del-ls)))
     (getf *config* :target)))
 
-;; Fetch file
-(defun fetch-file (src dst)
-  (logging (format t "FETCH ~A~%" (pathname src)))
-  (copy-file (pathname src) (pathname dst)))
-
-;; Update file
-(defun update-file (src dst)
-  (logging (format t "UPDATE ~A~%" (pathname src)))
-  (copy-file (pathname src) (pathname dst)))
-
-;; Skip processing file
-(defun skip-file (src)
-  (logging (format t "SKIP ~A~%" src)))
-
+;; Synchronize files
 (defun sync-file (p)
   ; Create directory
   (ensure-directories-exist (cdr p))
@@ -153,9 +156,10 @@
         (if (probe-file (pathname (cdr p)))
             ;; File already fetched
             (if (not (p-hashequal (pathname (car p)) (pathname (cdr p))))
-                ; File modified
+                ;; File modified
                 (update-file (car p) (cdr p))
-                ; File not modified
+
+                ;; File not modified
                 (skip-file (car p)))
             
             ;; File not fetched yet
@@ -166,22 +170,21 @@
         (logging 
           (format t "file not found, skip : ~A~%" (car p))))))
 
+;; sync command
 (defun sync ()
+  (format t "Synchronize~%")
+
   ;; Read config
   (read-config)
-
-  (format t "Synchronize~%")
     
-  ; Synchronize
-  (format t "synchronizing...")
-
-  (mapc
-    (lambda (p)
-      (if (equal "" (file-namestring (pathname (car p))))
-          (sync-dir p)
-          (sync-file p)))
-    (getf *config* :target))
-  (format t "DONE~%"))
+  ;; Synchronize
+  (proc-block "synchronizing"
+    (mapc
+      (lambda (p)
+        (if (p-file (car p))
+            (sync-file p)
+            (sync-dir p)))
+      (getf *config* :target))))
 
 (in-package :cl-user)
 
