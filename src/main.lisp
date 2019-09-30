@@ -9,129 +9,179 @@
     :restore))
 (in-package :rgit)
 
-(defun init (&optional (target nil))
-  (format t "initialize repository~%")
-  (format t "creating rgitfile...")
-  (with-open-file (out "./rgitfile" :direction :output :if-exists :supersede)
-    (write-line (format nil "~A~%" 
-                        "(:target ((\"/snapshot/target/directory/\" . \"mapped/\")))")
-                out))
-  (format t "DONE~%")
-  (format t "creating rgitignore...")
-  (with-open-file (out "./rgitignore" :direction :output :if-exists :supersede)
-    ; TODO
-    nil)
-  (format t "DONE~%"))
+(defvar +config-path+ "./rgitfile")
 
+(defparameter *config* nil)
+(defparameter *verbose* nil)
+(defparameter *updated* 0)
+(defparameter *fetched* 0)
+(defparameter *skipped* 0)
+(defparameter *entries* 0)
+(defparameter *not-found* 0)
+
+;; Logging
+(defmacro logging (&body body)
+  `(when *verbose*
+     ,@body))
+
+;; Show process block message
+(defmacro proc-block (proc-name &body body)
+  `(progn
+     (format t "~A..." ,proc-name)
+     ,@body
+     (format t "DONE")))
+
+;; init command
+(defun init (&optional (target nil))
+  (format t "Initialize repository~%")
+
+  (proc-block "creating rgitfile"
+    (with-open-file (out +config-path+ :direction :output :if-exists :supersede)
+      (write-line "(:target ((\"/snapshot/target/directory/\" . \"mapped/\")))~%" out))))
+
+;; Read file
 (defun slurp (path)
   (with-open-file (s path :direction :input)
     (let ((buf (make-string (file-length s))))
       (read-sequence buf s)
       buf)))
 
-(defun read-config (path)
-  (let (conf 
-        conf-ls)
-    (setf conf (slurp path))
-    (setf conf-ls (split-sequence:split-sequence #\Newline conf))
-    (mapcar 
-      (lambda (x)
-        (cons (car (split-sequence:split-sequence #\Space x))
-              (cadr (split-sequence:split-sequence #\Space x))))
-      (remove-if (lambda (x) (equal x "")) conf-ls))))
+;; File copy
+(defun copy-file (src dst)
+  (with-open-file (ins 
+                   src 
+                   :direction 
+                   :input 
+                   :element-type '(unsigned-byte 8)
+                   :if-does-not-exist nil)
+    (when ins
+      (with-open-file (outs 
+                       dst 
+                       :direction 
+                       :output 
+                       :element-type '(unsigned-byte 8)
+                       :if-exists :supersede)
+        (loop for byte = (read-byte ins nil)
+              while byte
+              do (write-byte byte outs))))))
 
-(defun byte-copy (infile outfile)
-  (with-open-file (instream infile :direction :input :element-type '(unsigned-byte 8)
-                            :if-does-not-exist nil)
-    (when instream
-      (with-open-file (outstream outfile :direction :output :element-type '(unsigned-byte 8)
-                                 :if-exists :supersede)
-        (loop for byte = (read-byte instream nil)
-           while byte
-           do (write-byte byte outstream))))))
+;; Read rgitfile
+(defun read-config ()
+  (setf *config* (read-from-string (slurp +config-path+))))
 
-(defun read-config-plist ()
-  (let ((conf (read-from-string (slurp "./rgitfile"))))
-    conf))
+;; Compare MD5
+(defun p-hashequal (x y)
+  (equal (coerce (md5:md5sum-file (pathname x)) 'list)
+         (coerce (md5:md5sum-file (pathname y)) 'list)))
 
-; TODO: can be replaced with enough-pathname
-(defun abs2rel (abs-path root)
-  (pathname (subseq (namestring abs-path) 
-                    (length (directory-namestring root)))))
+;; Synchronize directory
+(defun sync-dir (p)
+  (mapc
+    (lambda (p)
+      (let ((ls (directory (format nil "~A**/*.*" (car p))))
+            (del-ls (directory (format nil "~A**/*.*" (cdr p)))))
+        ; Create directory
+        (ensure-directories-exist (cdr p))
+        
+        ; Walk directory
+        (mapc
+          (lambda (src)
+            ; Remove from delete list
+            (setf del-ls
+                (remove-if (lambda (x) 
+                             (equal
+                               (namestring (enough-namestring x (car (directory "."))))
+                               (namestring (merge-pathnames (pathname (enough-namestring src (car p))) (pathname (cdr p))))))
+                           del-ls))
+            
+            ; Process file
+            (when (not (equal "" (file-namestring (pathname src))))
+              (let ((dst (merge-pathnames 
+                           (enough-namestring (pathname src) (pathname (car p)))
+                           (pathname (cdr p)))))
+                ; Create directory
+                (ensure-directories-exist (directory-namestring dst))
+                
+                ; Fetch file
+                (when (and (not (search "$" (namestring (pathname src)))))
+                  (if (probe-file (pathname dst))
+                      (progn
+                        (if (not (p-hashequal (pathname src) (pathname dst)))
+                            (progn
+                              (logging 
+                                (format t "update ~A~%" (pathname src)))
+                              (copy-file (pathname src) (pathname dst)))
+                            (progn
+                              (logging 
+                                (format t "skip ~A~%" (pathname src))))))
+                      (progn
+                        (logging 
+                          (format t "fetch ~A~%" (pathname src)))
+                        (copy-file (pathname src) (pathname dst))))))))
+          (directory (format nil "~A**/*.*" (car p))))
+
+          ; Delete missing files
+          (mapcar 
+            (lambda (x)
+              (when (not (equal "" (file-namestring (pathname x))))
+                (delete-file x)))
+            del-ls)))
+    (getf *config* :target)))
+
+;; Fetch file
+(defun fetch-file (src dst)
+  (logging (format t "FETCH ~A~%" (pathname src)))
+  (copy-file (pathname src) (pathname dst)))
+
+;; Update file
+(defun update-file (src dst)
+  (logging (format t "UPDATE ~A~%" (pathname src)))
+  (copy-file (pathname src) (pathname dst)))
+
+;; Skip processing file
+(defun skip-file (src)
+  (logging (format t "SKIP ~A~%" src)))
+
+(defun sync-file (p)
+  ; Create directory
+  (ensure-directories-exist (cdr p))
+  
+  ;; Process file
+  (if (probe-file (pathname (car p)))
+      ;; File found
+      (progn
+        (if (probe-file (pathname (cdr p)))
+            ;; File already fetched
+            (if (not (p-hashequal (pathname (car p)) (pathname (cdr p))))
+                ; File modified
+                (update-file (car p) (cdr p))
+                ; File not modified
+                (skip-file (car p)))
+            
+            ;; File not fetched yet
+            (fetch-file (car p) (cdr p))))
+
+      ;; File not found
+      (progn
+        (logging 
+          (format t "file not found, skip : ~A~%" (car p))))))
 
 (defun sync ()
-  (let ((conf (read-config-plist)))
-    (format t "synchronize~%")
+  ;; Read config
+  (read-config)
+
+  (format t "Synchronize~%")
     
-    ; Synchronize
-    (format t "synchronizing...")
-    ; * (equal (coerce (md5:md5sum-file #p"~/wk/notes/note") 'list) (coerce (md5:md5sum-file #p"~/wk/notes/task") 'list))
-    (mapc
-      (lambda (p)
-        (let ((ls (directory (format nil "~A**/*.*" (car p))))
-              (del-ls (directory (format nil "~A**/*.*" (cdr p)))))
-           ; Create parent
-          (ensure-directories-exist (cdr p))
-          
-          ; Probe directory
-          (mapc
-            (lambda (s)
-              ; Remove from delete list
-              (setf del-ls
-                  (remove-if (lambda (x) 
-                               (equal
-                                 (namestring (enough-namestring x (car (directory "."))))
-                                 (namestring (merge-pathnames (pathname (enough-namestring s (car p))) (pathname (cdr p))))))
-                             del-ls))
-              
-              ; Create directory and fetch file
-              (when (not (equal "" (file-namestring (pathname s))))
-                (let ((dst (merge-pathnames 
-                             (abs2rel s (car p))
-                             (pathname (cdr p)))))
-                  ; Create directory
-                  (ensure-directories-exist (directory-namestring dst))
-                  
-                  ; Fetch file
-                  ; TODO : check update before copy
-                  (byte-copy (pathname s) (pathname dst)))))
-            (directory (format nil "~A**/*.*" (car p))))
+  ; Synchronize
+  (format t "synchronizing...")
 
-            ; Delete missing files
-            (mapcar 
-              (lambda (x)
-                (when (not (equal "" (file-namestring (pathname x))))
-                  (delete-file x)))
-              del-ls)))
-      (getf conf :target))
-    (format t "DONE~%")))
-
-; (defun sync ()
-;   (let ((conf (read-config "./rgitfile")))
-;     (format t "synchronizing~%")
-;     
-;     ; Check updated files
-;     (format t "checking update...")
-;     nil
-;     (format t "DONE~%")
-; 
-;     ; Create directories
-;     (format t "creating directories...")
-;     (mapc (lambda (x) 
-;             (when (not (equal "" (directory-namestring (cdr x))))
-;               (ensure-directories-exist (directory-namestring (cdr x)))))
-;           conf)
-;     (format t "DONE~%")
-; 
-;     ; Fetch updated files
-;     (format t "fetching files...")
-;     (format t "~%")
-;     (mapc (lambda (x) 
-;             (format t "~A~%" x)
-;             (byte-copy (car x) (cdr x))
-;             )
-;           conf)
-;     (format t "DONE~%")))
+  (mapc
+    (lambda (p)
+      (if (equal "" (file-namestring (pathname (car p))))
+          (sync-dir p)
+          (sync-file p)))
+    (getf *config* :target))
+  (format t "DONE~%"))
 
 (in-package :cl-user)
 
