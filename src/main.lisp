@@ -6,7 +6,8 @@
     :sync
     :commit
     :status
-    :restore))
+    :restore
+    :main))
 (in-package :rgit)
 
 (defvar +config-path+ "./rgitfile")
@@ -19,6 +20,17 @@
 (defparameter *entries* 0)
 (defparameter *not-found* 0)
 
+;; Do when unknown option passed
+(defun unknown-opts (condition)
+  (format t "Warning: Unknown option ~s~%" (opts:option condition))
+  (invoke-restart 'opts:skip-option))
+
+;; Do when option designated
+(defmacro when-opts ((opts opt) &body body)
+  `(let ((it (getf ,opts ,opt)))
+     (when it
+       ,@body)))
+
 ;; Logging
 (defmacro logging (&body body)
   `(when *verbose*
@@ -29,7 +41,7 @@
   `(progn
      (format t "~A..." ,proc-name)
      ,@body
-     (format t "DONE")))
+     (format t "DONE~%")))
 
 ;; Read file
 (defun slurp (path)
@@ -179,12 +191,61 @@
     
   ;; Synchronize
   (proc-block "synchronizing"
+    (logging (format t "~%"))
     (mapc
       (lambda (p)
         (if (p-file (car p))
             (sync-file p)
             (sync-dir p)))
       (getf *config* :target))))
+
+;; Definition of command line arguments
+(opts:define-opts
+  (:name :help
+   :description "print this help text"
+   :short #\h
+   :long "help")
+  (:name :verbose
+   :description "verbose output"
+   :short #\v
+   :long "verbose"))
+
+;; Program entry point
+(defun main ()
+  (multiple-value-bind (opts args)
+    (handler-case
+        (handler-bind ((opts:unknown-option #'unknown-opts))
+          (opts:get-opts))
+      (opts:missing-arg (condition)
+        (format t "fatal: option ~s needs an argument!~%"
+                (opts:option condition)))
+      (opts:arg-parser-failed (condition)
+        (format t "fatal: cannot parse ~s as argument of ~s~%"
+                (opts:raw-arg condition)
+                (opts:option condition)))
+      (opts:missing-required-option (con)
+        (format t "fatal: ~a~%" con)
+        (opts:exit 1)))
+
+  ;; Help
+  (when-opts (opts :help)
+    (opts:describe
+     :prefix "rgit"
+     :suffix ""
+     :usage-of "rgit"
+     :args     "[FREE-ARGS]"))
+
+  ;; Check verbose option
+  (when-opts (opts :verbose)
+    (setf *verbose* t))
+
+  ;; Execute sub-command
+  (if (> (length args) 0)
+    (cond
+      ((equal "sync" (car args)) (sync))
+      ((equal "init" (car args)) (init))
+      (t (write-line "Unknown command, rgit -h to show help.")))
+    (write-line "Command not specified, rgit -h to show help."))))
 
 (in-package :cl-user)
 
