@@ -2,7 +2,7 @@
   :version "0.1.0"
   :author "kedama"
   :license "MIT"
-  :depends-on ("split-sequence" "md5" "unix-opts")
+  :depends-on ("split-sequence" "md5" "unix-opts" "cl-fad")
   :components ((:module "src"
                 :components
                 ((:file "main"))))

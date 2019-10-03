@@ -7,6 +7,7 @@
     :commit
     :status
     :restore
+    :add
     :main))
 (in-package :rgit)
 
@@ -49,6 +50,12 @@
     (let ((buf (make-string (file-length s))))
       (read-sequence buf s)
       buf)))
+
+;; Write file
+(defun spit (path content)
+  (with-open-file 
+    (out path :direction :output :if-exists :supersede)
+    (write-line content out)))
 
 ;; File copy
 (defun copy-file (src dst)
@@ -199,6 +206,48 @@
             (sync-dir p)))
       (getf *config* :target))))
 
+;; add command
+(defun add (args)
+  (format t "Add~%")
+  
+  (read-config)
+  
+  (let ((src (nth 1 args))
+        (dst (nth 2 args)))
+
+  (format t "~A ==> ~A~%" src dst)
+
+    ;; Add target
+    (setf (getf *config* :target)
+          (append (getf *config* :target) (list (cons src dst))))
+
+    ;; Validate path
+    (unless
+      (and 
+        ; Validate src path
+        (if (p-file (pathname src))
+            (progn
+              (logging (format nil "SRC/FILE~%"))
+              (probe-file src))
+            (progn
+              (logging (format nil "SRC/DIR~%"))
+              (cl-fad:directory-exists-p src)))
+        
+        ; Validate dst path
+        (if (p-file (pathname dst))
+            (progn
+              (logging (format nil "DST/FILE~%"))
+              (not (probe-file dst)))
+            (progn
+              (logging (format nil "DST/DIR~%"))
+              (not (cl-fad:directory-exists-p dst)))))
+      
+      (format t "ERROR : Invalid path!~%")
+      (return-from add nil))
+    
+    ;; Write rgitfile
+    (spit +config-path+ (format nil "~S" *config*))))
+
 ;; Definition of command line arguments
 (opts:define-opts
   (:name :help
@@ -244,6 +293,7 @@
     (cond
       ((equal "sync" (car args)) (sync))
       ((equal "init" (car args)) (init))
+      ((equal "add" (car args)) (add args))
       (t (write-line "Unknown command, rgit -h to show help.")))
     (write-line "Command not specified, rgit -h to show help."))))
 
